@@ -27,6 +27,11 @@ public class MeetingController {
         return meetingService.createMeeting(meetingId);
     }
 
+    @PostMapping("/{meetingId}/join")
+    public ResponseEntity<Meeting> joinMeeting(@PathVariable String meetingId) {
+        return ResponseEntity.ok(meetingService.createMeeting(meetingId));
+    }
+
     @PostMapping("/{meetingId}")
     public ResponseEntity<Meeting> ensureMeeting(@PathVariable String meetingId) {
         return meetingService.getMeeting(meetingId)
