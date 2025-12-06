@@ -13,11 +13,14 @@ public class MeetingService {
 
     private final MeetingRepository meetingRepository;
 
-    public Meeting createMeeting(String meetingId) {
-        Meeting meeting = new Meeting();
-        meeting.setMeetingId(meetingId);
-        meeting.setStartTime(System.currentTimeMillis());
-        return meetingRepository.save(meeting);
+    public Meeting startOrGetMeeting(String meetingId) {
+        return meetingRepository.findByMeetingId(meetingId)
+                .orElseGet(() -> {
+                    Meeting meeting = new Meeting();
+                    meeting.setMeetingId(meetingId);
+                    meeting.setStartTime(System.currentTimeMillis());
+                    return meetingRepository.save(meeting);
+                });
     }
 
     public Optional<Meeting> getMeeting(String meetingId) {
