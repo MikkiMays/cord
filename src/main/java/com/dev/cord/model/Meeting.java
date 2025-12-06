@@ -13,10 +13,7 @@ import lombok.NoArgsConstructor;
 public class Meeting {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    @Column(name = "id")
-    private Long id;
-    @Column(name = "meeting_id")
+    @Column(name = "meeting_id", nullable = false, unique = true, updatable = false)
     private String meetingId;
     @Column(name = "start_time")
     private Long startTime;

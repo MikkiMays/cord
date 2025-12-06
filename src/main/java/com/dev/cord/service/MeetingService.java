@@ -1,5 +1,6 @@
 package com.dev.cord.service;
 
+import com.dev.cord.exception.MeetingNotFoundException;
 import com.dev.cord.model.Meeting;
 import com.dev.cord.repository.MeetingRepository;
 import lombok.RequiredArgsConstructor;
@@ -13,7 +14,7 @@ public class MeetingService {
 
     private final MeetingRepository meetingRepository;
 
-    public Meeting startOrGetMeeting(String meetingId) {
+    public Meeting createMeeting(String meetingId) {
         return meetingRepository.findByMeetingId(meetingId)
                 .orElseGet(() -> {
                     Meeting meeting = new Meeting();
@@ -21,6 +22,11 @@ public class MeetingService {
                     meeting.setStartTime(System.currentTimeMillis());
                     return meetingRepository.save(meeting);
                 });
+    }
+
+    public Meeting requireMeeting(String meetingId) {
+        return meetingRepository.findByMeetingId(meetingId)
+                .orElseThrow(() -> new MeetingNotFoundException(meetingId));
     }
 
     public Optional<Meeting> getMeeting(String meetingId) {

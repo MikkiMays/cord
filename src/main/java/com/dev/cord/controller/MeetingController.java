@@ -24,12 +24,14 @@ public class MeetingController {
     @PostMapping
     public Meeting createMeeting() {
         String meetingId = UUID.randomUUID().toString();
-        return meetingService.startOrGetMeeting(meetingId);
+        return meetingService.createMeeting(meetingId);
     }
 
     @PostMapping("/{meetingId}")
-    public Meeting ensureMeeting(@PathVariable String meetingId) {
-        return meetingService.startOrGetMeeting(meetingId);
+    public ResponseEntity<Meeting> ensureMeeting(@PathVariable String meetingId) {
+        return meetingService.getMeeting(meetingId)
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     @GetMapping("/{meetingId}")
