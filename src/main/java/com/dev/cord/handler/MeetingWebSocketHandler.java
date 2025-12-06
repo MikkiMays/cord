@@ -14,8 +14,10 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,6 +32,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
 
     private final Map<String, Map<String, WebSocketSession>> meetingSessions = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Participant>> meetingParticipants = new ConcurrentHashMap<>();
+    private final Map<String, List<ChatMessage>> meetingChatHistory = new ConcurrentHashMap<>();
     private final Map<String, String> sessionIdToMeetingId = new ConcurrentHashMap<>();
 
     @Override
@@ -40,7 +43,10 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        meetingService.startOrGetMeeting(meetingId);
+        if (!meetingService.getMeeting(meetingId).isPresent()) {
+            session.close(new CloseStatus(4404, "Meeting not found"));
+            return;
+        }
         meetingSessions.computeIfAbsent(meetingId, key -> new ConcurrentHashMap<>()).put(session.getId(), session);
         meetingParticipants.computeIfAbsent(meetingId, key -> new ConcurrentHashMap<>());
         sessionIdToMeetingId.put(session.getId(), meetingId);
@@ -51,6 +57,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         ));
 
         sendExistingParticipants(session, meetingId);
+        sendChatHistory(session, meetingId);
         log.info("Пользователь {} подключился к встрече {}", session.getId(), meetingId);
     }
 
@@ -67,6 +74,8 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
 
         if ("set-name".equals(messageType)) {
             registerUser(session, meetingId, (String) message.get("name"));
+        } else if ("chat".equals(messageType)) {
+            handleChatMessage(session, meetingId, (String) message.get("content"));
         } else {
             message.put("sender", session.getId());
             broadcastToOthers(session, meetingId, message);
@@ -92,6 +101,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
                 if (sessions.isEmpty()) {
                     meetingSessions.remove(meetingId);
                     meetingParticipants.remove(meetingId);
+                    meetingChatHistory.remove(meetingId);
                     meetingService.endMeeting(meetingId);
                 }
             }
@@ -147,11 +157,47 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         ));
     }
 
+    private void sendChatHistory(WebSocketSession session, String meetingId) throws IOException {
+        List<ChatMessage> history = meetingChatHistory.getOrDefault(meetingId, List.of());
+        sendMessage(session, Map.of(
+                "type", "chat-history",
+                "items", history
+        ));
+    }
+
+    private void handleChatMessage(WebSocketSession session, String meetingId, String content) throws IOException {
+        if (!StringUtils.hasText(content)) {
+            return;
+        }
+
+        Participant participant = Optional.ofNullable(meetingParticipants.get(meetingId))
+                .map(participants -> participants.get(session.getId()))
+                .orElseGet(() -> new Participant(session.getId(), "guest-" + session.getId()));
+
+        ChatMessage chatMessage = new ChatMessage(session.getId(), participant.userName(), content.trim(), System.currentTimeMillis());
+        meetingChatHistory.computeIfAbsent(meetingId, key -> new ArrayList<>()).add(chatMessage);
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("type", "chat");
+        payload.put("message", chatMessage);
+        broadcastToAll(meetingId, payload);
+    }
+
     private void broadcastToOthers(WebSocketSession sender, String meetingId, Map<String, ?> message) throws IOException {
         Map<String, WebSocketSession> sessions = meetingSessions.getOrDefault(meetingId, Map.of());
         String payload = serializeMessage(message);
         for (WebSocketSession session : sessions.values()) {
             if (!session.getId().equals(sender.getId()) && session.isOpen()) {
+                session.sendMessage(new TextMessage(payload));
+            }
+        }
+    }
+
+    private void broadcastToAll(String meetingId, Map<String, ?> message) throws IOException {
+        Map<String, WebSocketSession> sessions = meetingSessions.getOrDefault(meetingId, Map.of());
+        String payload = serializeMessage(message);
+        for (WebSocketSession session : sessions.values()) {
+            if (session.isOpen()) {
                 session.sendMessage(new TextMessage(payload));
             }
         }
@@ -175,4 +221,5 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
     }
 
     private record Participant(String sessionId, String userName) {}
+    private record ChatMessage(String sessionId, String userName, String content, long timestamp) {}
 }
