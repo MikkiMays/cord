@@ -17,6 +17,6 @@ public class WebRTCWebSocketConfig implements WebSocketConfigurer {
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(meetingWebSocketHandler, "/webrtc-signal")
-                .setAllowedOrigins("http://localhost:3000");
+                .setAllowedOriginPatterns("http://localhost:*", "http://127.0.0.1:*", "http://localhost");
     }
 }

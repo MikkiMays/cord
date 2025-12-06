@@ -17,7 +17,7 @@ public class StompWebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         registry.addEndpoint("/chat") // Эндпоинт для STOMP-сообщений
-                .setAllowedOrigins("http://localhost:3000/") // CORS
+                .setAllowedOriginPatterns("http://localhost:*", "http://127.0.0.1:*") // CORS
                 .withSockJS(); // Использование SockJS для обратной совместимости
     }
 }
