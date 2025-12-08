@@ -64,13 +64,13 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         String meetingId = extractMeetingId(session).orElse(null);
         if (meetingId == null) {
-            log.warn("WebSocket без meetingId, закрываем: {}", session.getId());
+            log.warn("WebSocket without meetingId, closing...: {}", session.getId());
             session.close(CloseStatus.BAD_DATA);
             return;
         }
 
         if (meetingService.getMeeting(meetingId).isEmpty()) {
-            log.warn("Встреча {} не найдена, закрываем: {}", meetingId, session.getId());
+            log.warn("Meeting {} not found, closing...: {}", meetingId, session.getId());
             session.close(new CloseStatus(4404, "Meeting not found"));
             return;
         }
@@ -100,7 +100,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
                 "items", new ArrayList<>(participants.values())
         ));
 
-        log.info("Сессия {} подключилась к встрече {}", session.getId(), meetingId);
+        log.info("Session {} connected to meeting {}", session.getId(), meetingId);
     }
 
     @Override
@@ -117,7 +117,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        log.debug("Сообщение '{}' от {} в {}", type, session.getId(), meetingId);
+        log.debug("Message '{}' from {} in {}", type, session.getId(), meetingId);
 
         switch (type) {
             case "set-name" -> handleSetName(session, meetingId, msg);
@@ -125,13 +125,13 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
             case "chat" -> handleChat(session, meetingId, msg);
             case "leave" -> session.close(CloseStatus.NORMAL);
             case "offer", "answer", "candidate" -> relayWebRtcSignal(session, meetingId, msg);
-            default -> log.debug("Неизвестный тип: {}", type);
+            default -> log.debug("Unknown type: {}", type);
         }
     }
 
     @Override
     public void handleTransportError(WebSocketSession session, Throwable ex) throws Exception {
-        log.warn("Ошибка транспорта {}: {}", session.getId(), ex.getMessage());
+        log.warn("Transport error {}: {}", session.getId(), ex.getMessage());
         super.handleTransportError(session, ex);
     }
 
@@ -157,7 +157,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
                 meetingParticipants.remove(meetingId);
                 meetingChatHistory.remove(meetingId);
                 meetingService.endMeeting(meetingId);
-                log.info("Встреча {} завершена - все вышли", meetingId);
+                log.info("Meeting {} ended - all participants left", meetingId);
                 return;
             }
         }
@@ -172,7 +172,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
 
             // Рассылаем обновлённый список участников
             broadcastParticipantsList(meetingId);
-            log.info("Участник '{}' покинул '{}'", leaving.userName(), meetingId);
+            log.info("Participant '{}' left '{}'", leaving.userName(), meetingId);
         }
     }
 
@@ -181,7 +181,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
      */
     private void handleSetName(WebSocketSession session, String meetingId, Map<String, Object> msg) throws IOException {
         String name = (String) msg.get("name");
-        String userName = StringUtils.hasText(name) ? name.trim() : "Гость";
+        String userName = StringUtils.hasText(name) ? name.trim() : "Guest";
 
         Map<String, Participant> participants = meetingParticipants.computeIfAbsent(meetingId, k -> new ConcurrentHashMap<>());
         boolean isNew = !participants.containsKey(session.getId());
@@ -203,7 +203,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
                     "sessionId", session.getId(),
                     "userName", userName
             ));
-            log.info("Новый участник '{}' в '{}'", userName, meetingId);
+            log.info("New participant '{}' в '{}'", userName, meetingId);
         }
 
         // Рассылаем обновлённый список ВСЕМ
@@ -232,7 +232,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         );
         participants.put(session.getId(), updated);
 
-        log.debug("Медиа статус '{}': audio={}, video={}", existing.userName(), updated.audioEnabled(), updated.videoEnabled());
+        log.debug("Media status '{}': audio={}, video={}", existing.userName(), updated.audioEnabled(), updated.videoEnabled());
 
         // ВАЖНО: Рассылаем обновлённый список ВСЕМ чтобы UI обновился
         broadcastParticipantsList(meetingId);
@@ -250,7 +250,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
 
         Map<String, Participant> participants = meetingParticipants.get(meetingId);
         Participant sender = participants != null ? participants.get(session.getId()) : null;
-        String userName = sender != null ? sender.userName() : "Гость";
+        String userName = sender != null ? sender.userName() : "Guest";
 
         ChatMessage chatMsg = new ChatMessage(
                 session.getId(),
@@ -294,7 +294,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         Map<String, Participant> participants = meetingParticipants.getOrDefault(meetingId, Map.of());
         List<Participant> list = new ArrayList<>(participants.values());
 
-        log.debug("Рассылка списка участников: {} чел.", list.size());
+        log.debug("Sending to all count of participants: {} ppl.", list.size());
 
         broadcast(meetingId, Map.of(
                 "type", "participants",
@@ -348,7 +348,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         try {
             return objectMapper.readValue(json, HashMap.class);
         } catch (Exception e) {
-            log.error("Ошибка парсинга JSON: {}", e.getMessage());
+            log.error("JSON parse error: {}", e.getMessage());
             return new HashMap<>();
         }
     }
