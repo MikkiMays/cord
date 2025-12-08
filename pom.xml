@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.dev</groupId>
     <artifactId>cord</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>1.0.0</version>
     <name>cord</name>
     <description>cord</description>
     <url/>
@@ -91,6 +91,7 @@
     </dependencies>
 
     <build>
+        <finalName>cord</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
@@ -102,6 +103,14 @@
                             <artifactId>lombok</artifactId>
                         </exclude>
                     </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>17</source>
+                    <target>17</target>
                 </configuration>
             </plugin>
         </plugins>
