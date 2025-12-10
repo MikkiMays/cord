@@ -90,7 +90,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // Отменяем pending завершение встречи, если оно было запланировано
+        // Отменяем pending завершение встречи, если было
         ScheduledFuture<?> pendingEnd = pendingMeetingEnd.remove(meetingId);
         if (pendingEnd != null) {
             pendingEnd.cancel(false);
@@ -102,24 +102,37 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
                 .put(session.getId(), session);
         sessionIdToMeetingId.put(session.getId(), meetingId);
 
+        // Сразу регистрируем участника как "Гость", если его ещё нет
+        Map<String, Participant> participants =
+                meetingParticipants.computeIfAbsent(meetingId, k -> new ConcurrentHashMap<>());
+
+        participants.putIfAbsent(session.getId(),
+                new Participant(session.getId(), "Гость", true, true));
+
         // 1. Отправляем sessionId клиенту
         send(session, Map.of(
                 "type", "your-id",
                 "sessionId", session.getId()
         ));
 
-        // 2. Отправляем историю чата
+        // 2. История чата
         List<ChatMessage> history = meetingChatHistory.getOrDefault(meetingId, List.of());
         send(session, Map.of(
                 "type", "chat-history",
                 "items", history
         ));
 
-        // 3. Отправляем текущий список участников
-        Map<String, Participant> participants = meetingParticipants.getOrDefault(meetingId, Map.of());
+        // 3. Текущий список участников (с уже добавленным "Гость")
         send(session, Map.of(
                 "type", "participants",
                 "items", new ArrayList<>(participants.values())
+        ));
+
+        // 4. Сообщаем остальным, что появился новый участник
+        broadcastToOthers(session.getId(), meetingId, Map.of(
+                "type", "new-user",
+                "sessionId", session.getId(),
+                "userName", participants.get(session.getId()).userName()
         ));
 
         log.info("Session {} connected to meeting {}", session.getId(), meetingId);
@@ -151,8 +164,17 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
                 session.close(CloseStatus.NORMAL);
             }
             case "offer", "answer", "candidate" -> relayWebRtcSignal(session, meetingId, msg);
+            case "ping" -> {
+                // RTT для клиента
+                Object t = msg.get("t");
+                send(session, Map.of(
+                        "type", "pong",
+                        "t", t
+                ));
+            }
             default -> log.debug("Unknown message type: {}", type);
         }
+
     }
 
     @Override
@@ -231,34 +253,57 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
     /**
      * Регистрация участника по имени
      */
+//    private void handleSetName(WebSocketSession session, String meetingId, Map<String, Object> msg) throws IOException {
+//        String name = (String) msg.get("name");
+//        String userName = StringUtils.hasText(name) ? name.trim() : "Гость";
+//
+//        Map<String, Participant> participants = meetingParticipants.computeIfAbsent(meetingId, k -> new ConcurrentHashMap<>());
+//        boolean isNew = !participants.containsKey(session.getId());
+//
+//        // Получаем существующего или создаём нового
+//        Participant existing = participants.get(session.getId());
+//        Participant updated = new Participant(
+//                session.getId(),
+//                userName,
+//                existing != null ? existing.audioEnabled() : true,
+//                existing != null ? existing.videoEnabled() : true
+//        );
+//        participants.put(session.getId(), updated);
+//
+//        if (isNew) {
+//            // Уведомляем ДРУГИХ о новом участнике (для WebRTC)
+//            broadcastToOthers(session.getId(), meetingId, Map.of(
+//                    "type", "new-user",
+//                    "sessionId", session.getId(),
+//                    "userName", userName
+//            ));
+//            log.info("New participant '{}' in meeting '{}'", userName, meetingId);
+//        }
+//
+//        // Рассылаем обновлённый список ВСЕМ
+//        broadcastParticipantsList(meetingId);
+//    }
+
     private void handleSetName(WebSocketSession session, String meetingId, Map<String, Object> msg) throws IOException {
         String name = (String) msg.get("name");
         String userName = StringUtils.hasText(name) ? name.trim() : "Гость";
 
-        Map<String, Participant> participants = meetingParticipants.computeIfAbsent(meetingId, k -> new ConcurrentHashMap<>());
-        boolean isNew = !participants.containsKey(session.getId());
+        Map<String, Participant> participants =
+                meetingParticipants.computeIfAbsent(meetingId, k -> new ConcurrentHashMap<>());
 
-        // Получаем существующего или создаём нового
         Participant existing = participants.get(session.getId());
         Participant updated = new Participant(
                 session.getId(),
                 userName,
-                existing != null ? existing.audioEnabled() : true,
-                existing != null ? existing.videoEnabled() : true
+                existing == null || existing.audioEnabled(),
+                existing == null || existing.videoEnabled()
         );
         participants.put(session.getId(), updated);
 
-        if (isNew) {
-            // Уведомляем ДРУГИХ о новом участнике (для WebRTC)
-            broadcastToOthers(session.getId(), meetingId, Map.of(
-                    "type", "new-user",
-                    "sessionId", session.getId(),
-                    "userName", userName
-            ));
-            log.info("New participant '{}' in meeting '{}'", userName, meetingId);
-        }
+        log.info("Participant '{}' set name to '{}' in meeting '{}'",
+                session.getId(), userName, meetingId);
 
-        // Рассылаем обновлённый список ВСЕМ
+        // Рассылаем обновлённый список всем
         broadcastParticipantsList(meetingId);
     }
 
