@@ -3,7 +3,6 @@ package com.dev.cord.handler;
 import com.dev.cord.service.MeetingService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -20,6 +19,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * WebSocket handler для управления видеовстречами.
@@ -45,11 +48,16 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Component
 @Slf4j
-@RequiredArgsConstructor
 public class MeetingWebSocketHandler extends TextWebSocketHandler {
 
     private final MeetingService meetingService;
     private final ObjectMapper objectMapper;
+
+    // Scheduler для отложенных операций
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+
+    // Grace period для завершения встречи (в секундах)
+    private static final int MEETING_END_GRACE_PERIOD_SECONDS = 10;
 
     // meetingId -> (sessionId -> WebSocketSession)
     private final Map<String, Map<String, WebSocketSession>> meetingSessions = new ConcurrentHashMap<>();
@@ -59,20 +67,34 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
     private final Map<String, List<ChatMessage>> meetingChatHistory = new ConcurrentHashMap<>();
     // sessionId -> meetingId
     private final Map<String, String> sessionIdToMeetingId = new ConcurrentHashMap<>();
+    // meetingId -> ScheduledFuture для отложенного завершения
+    private final Map<String, ScheduledFuture<?>> pendingMeetingEnd = new ConcurrentHashMap<>();
+
+    public MeetingWebSocketHandler(MeetingService meetingService, ObjectMapper objectMapper) {
+        this.meetingService = meetingService;
+        this.objectMapper = objectMapper;
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         String meetingId = extractMeetingId(session).orElse(null);
         if (meetingId == null) {
-            log.warn("WebSocket without meetingId, closing...: {}", session.getId());
+            log.warn("WebSocket без meetingId, закрываем: {}", session.getId());
             session.close(CloseStatus.BAD_DATA);
             return;
         }
 
         if (meetingService.getMeeting(meetingId).isEmpty()) {
-            log.warn("Meeting {} not found, closing...: {}", meetingId, session.getId());
+            log.warn("Встреча {} не найдена, закрываем: {}", meetingId, session.getId());
             session.close(new CloseStatus(4404, "Meeting not found"));
             return;
+        }
+
+        // Отменяем pending завершение встречи, если оно было запланировано
+        ScheduledFuture<?> pendingEnd = pendingMeetingEnd.remove(meetingId);
+        if (pendingEnd != null) {
+            pendingEnd.cancel(false);
+            log.info("Отменено отложенное завершение встречи {} - новый участник подключился", meetingId);
         }
 
         // Сохраняем сессию
@@ -107,6 +129,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
     protected void handleTextMessage(WebSocketSession session, TextMessage textMessage) throws Exception {
         String meetingId = sessionIdToMeetingId.get(session.getId());
         if (meetingId == null) {
+            log.warn("Session {} не привязана к встрече, закрываем", session.getId());
             session.close(CloseStatus.BAD_DATA);
             return;
         }
@@ -123,15 +146,18 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
             case "set-name" -> handleSetName(session, meetingId, msg);
             case "media-status" -> handleMediaStatus(session, meetingId, msg);
             case "chat" -> handleChat(session, meetingId, msg);
-            case "leave" -> session.close(CloseStatus.NORMAL);
+            case "leave" -> {
+                log.info("Participant {} requested leave from {}", session.getId(), meetingId);
+                session.close(CloseStatus.NORMAL);
+            }
             case "offer", "answer", "candidate" -> relayWebRtcSignal(session, meetingId, msg);
-            default -> log.debug("Unknown type: {}", type);
+            default -> log.debug("Unknown message type: {}", type);
         }
     }
 
     @Override
     public void handleTransportError(WebSocketSession session, Throwable ex) throws Exception {
-        log.warn("Transport error {}: {}", session.getId(), ex.getMessage());
+        log.warn("Transport error for session {}: {}", session.getId(), ex.getMessage());
         super.handleTransportError(session, ex);
     }
 
@@ -139,8 +165,12 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
         String meetingId = sessionIdToMeetingId.remove(session.getId());
         if (meetingId == null) {
+            log.debug("Session {} closed without meeting association", session.getId());
             return;
         }
+
+        log.info("Session {} disconnected from meeting {} (status: {})",
+                session.getId(), meetingId, status);
 
         // Удаляем участника
         Map<String, Participant> participants = meetingParticipants.get(meetingId);
@@ -152,12 +182,15 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
             sessions.remove(session.getId());
 
             if (sessions.isEmpty()) {
-                // Комната пуста - очищаем всё
-                meetingSessions.remove(meetingId);
-                meetingParticipants.remove(meetingId);
-                meetingChatHistory.remove(meetingId);
-                meetingService.endMeeting(meetingId);
-                log.info("Meeting {} ended - all participants left", meetingId);
+                // Комната пуста - планируем отложенное завершение
+                log.info("Meeting {} is empty, scheduling end in {} seconds",
+                        meetingId, MEETING_END_GRACE_PERIOD_SECONDS);
+
+                ScheduledFuture<?> future = scheduler.schedule(() -> {
+                    endMeetingIfEmpty(meetingId);
+                }, MEETING_END_GRACE_PERIOD_SECONDS, TimeUnit.SECONDS);
+
+                pendingMeetingEnd.put(meetingId, future);
                 return;
             }
         }
@@ -172,7 +205,26 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
 
             // Рассылаем обновлённый список участников
             broadcastParticipantsList(meetingId);
-            log.info("Participant '{}' left '{}'", leaving.userName(), meetingId);
+            log.info("Participant '{}' left meeting '{}'", leaving.userName(), meetingId);
+        }
+    }
+
+    /**
+     * Завершает встречу если она всё ещё пуста
+     */
+    private void endMeetingIfEmpty(String meetingId) {
+        pendingMeetingEnd.remove(meetingId);
+
+        Map<String, WebSocketSession> sessions = meetingSessions.get(meetingId);
+        if (sessions == null || sessions.isEmpty()) {
+            // Действительно пусто - завершаем
+            meetingSessions.remove(meetingId);
+            meetingParticipants.remove(meetingId);
+            meetingChatHistory.remove(meetingId);
+            meetingService.endMeeting(meetingId);
+            log.info("Meeting {} ended - no participants after grace period", meetingId);
+        } else {
+            log.info("Meeting {} not ended - participants rejoined during grace period", meetingId);
         }
     }
 
@@ -181,7 +233,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
      */
     private void handleSetName(WebSocketSession session, String meetingId, Map<String, Object> msg) throws IOException {
         String name = (String) msg.get("name");
-        String userName = StringUtils.hasText(name) ? name.trim() : "Guest";
+        String userName = StringUtils.hasText(name) ? name.trim() : "Гость";
 
         Map<String, Participant> participants = meetingParticipants.computeIfAbsent(meetingId, k -> new ConcurrentHashMap<>());
         boolean isNew = !participants.containsKey(session.getId());
@@ -203,7 +255,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
                     "sessionId", session.getId(),
                     "userName", userName
             ));
-            log.info("New participant '{}' в '{}'", userName, meetingId);
+            log.info("New participant '{}' in meeting '{}'", userName, meetingId);
         }
 
         // Рассылаем обновлённый список ВСЕМ
@@ -250,7 +302,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
 
         Map<String, Participant> participants = meetingParticipants.get(meetingId);
         Participant sender = participants != null ? participants.get(session.getId()) : null;
-        String userName = sender != null ? sender.userName() : "Guest";
+        String userName = sender != null ? sender.userName() : "Гость";
 
         ChatMessage chatMsg = new ChatMessage(
                 session.getId(),
@@ -275,15 +327,24 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
      */
     private void relayWebRtcSignal(WebSocketSession session, String meetingId, Map<String, Object> msg) throws IOException {
         String receiver = (String) msg.get("receiver");
-        if (receiver == null) return;
+        if (receiver == null) {
+            log.warn("WebRTC signal without receiver from {}", session.getId());
+            return;
+        }
 
         Map<String, WebSocketSession> sessions = meetingSessions.get(meetingId);
-        if (sessions == null) return;
+        if (sessions == null) {
+            log.warn("No sessions for meeting {} when relaying WebRTC signal", meetingId);
+            return;
+        }
 
         WebSocketSession target = sessions.get(receiver);
         if (target != null && target.isOpen()) {
             msg.put("sender", session.getId());
             send(target, msg);
+            log.debug("Relayed {} from {} to {}", msg.get("type"), session.getId(), receiver);
+        } else {
+            log.warn("Target session {} not found or closed for WebRTC signal", receiver);
         }
     }
 
@@ -294,7 +355,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         Map<String, Participant> participants = meetingParticipants.getOrDefault(meetingId, Map.of());
         List<Participant> list = new ArrayList<>(participants.values());
 
-        log.debug("Sending to all count of participants: {} ppl.", list.size());
+        log.debug("Broadcasting participants list: {} participants", list.size());
 
         broadcast(meetingId, Map.of(
                 "type", "participants",
@@ -310,7 +371,11 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         String json = toJson(msg);
         for (WebSocketSession s : sessions.values()) {
             if (s.isOpen()) {
-                s.sendMessage(new TextMessage(json));
+                try {
+                    s.sendMessage(new TextMessage(json));
+                } catch (IOException e) {
+                    log.warn("Failed to send message to session {}: {}", s.getId(), e.getMessage());
+                }
             }
         }
     }
@@ -323,13 +388,19 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         String json = toJson(msg);
         for (WebSocketSession s : sessions.values()) {
             if (!s.getId().equals(senderId) && s.isOpen()) {
-                s.sendMessage(new TextMessage(json));
+                try {
+                    s.sendMessage(new TextMessage(json));
+                } catch (IOException e) {
+                    log.warn("Failed to send message to session {}: {}", s.getId(), e.getMessage());
+                }
             }
         }
     }
 
     private void send(WebSocketSession session, Map<String, ?> msg) throws IOException {
-        session.sendMessage(new TextMessage(toJson(msg)));
+        if (session.isOpen()) {
+            session.sendMessage(new TextMessage(toJson(msg)));
+        }
     }
 
     private Optional<String> extractMeetingId(WebSocketSession session) {
@@ -344,6 +415,7 @@ public class MeetingWebSocketHandler extends TextWebSocketHandler {
         return Optional.empty();
     }
 
+    @SuppressWarnings("unchecked")
     private Map<String, Object> parseJson(String json) {
         try {
             return objectMapper.readValue(json, HashMap.class);
